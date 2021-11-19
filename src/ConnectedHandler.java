@@ -3,6 +3,18 @@ import java.util.TimerTask;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ *       ConnectedHandler
+ *       Authors:    VOSKA, Vojtech
+ *                   WEIJUN, Huang
+ *                   & Ecole staff
+ *
+ *       Date:       24.11.2021
+ *
+ *       Usage:
+ *           see Talk_2
+ */
+
 public class ConnectedHandler extends Handler
 {
 
@@ -15,7 +27,6 @@ public class ConnectedHandler extends Handler
     }
 
     // don't change the two following definitions
-
     private static final String HELLO = "--HELLO--";
     private static final String ACK = "--ACK--";
 
@@ -23,48 +34,58 @@ public class ConnectedHandler extends Handler
      * the two following parameters are suitable for manual experimentation and
      * automatic validation
      */
-
-    /** delay before retransmitting a non acked message */
+    static boolean DEBUG = true;
+    /**
+     * delay before retransmitting a non acked message
+     */
     private static final int DELAY = 300;
 
-    /** number of times a non acked message is sent before timeout */
+    /**
+     * number of times a non acked message is sent before timeout
+     */
     private static final int MAX_REPEAT = 10;
 
-    /** A single Timer for all usages. Don't cancel it. **/
-    private static final Timer TIMER = new Timer("ConnectedHandler's Timer",true);
+    /**
+     * A single Timer for all usages. Don't cancel it.
+     **/
+    private static final Timer TIMER = new Timer("ConnectedHandler's Timer", true);
 
-    private final int localId;
-    private final int remoteId;
-    private final int senderPN;
-    private final int receiverPN;
+    private final int local_ID;
+    private int remote_ID;
+
+    private volatile int local_packet_number; // the one I just sent to the Remote
+    private volatile int remote_packet_number; // the last one I got from the Remote
     private final String destination;
     private Handler aboveHandler;
-    private Handler under;
-    private final Object lock ;
-    // to be completed
+    private final Handler underHandler;
+    private final Object lock;
+
 
     /**
      * Initializes a new connected handler with the specified parameters
      *
-     * @param _under
-     *          the {@link Handler} on which the new handler will be stacked
-     * @param _localId
-     *          the connection Id used to identify this connected handler
-     * @param _destination
-     *          a {@code String} identifying the destination
+     * @param _under       the {@link Handler} on which the new handler will be stacked
+     * @param _localId     the connection Id used to identify this connected handler
+     * @param _destination a {@code String} identifying the destination
      */
     public ConnectedHandler(final Handler _under, int _localId, String _destination)
     {
         super(_under, _localId, true);
-        this.localId = _localId;
+        this.local_ID = _localId;
         this.destination = _destination;
-        // to be completed
-        this.remoteId = -1;
-        this.senderPN = 0;
-        this.receiverPN = 0;
-        this.under = _under;
+        this.remote_ID = -1;
+        this.local_packet_number = 0;
+        this.remote_packet_number = 0;
+        this.underHandler = _under;
         this.lock = new Object();
+        debug("LOCAL ID: " + this.local_ID);
         send(HELLO);
+
+        while (this.remote_ID == -1)
+        {
+            // wait
+        }
+        debug("REMOTE ID: " + this.remote_ID);
     }
 
     // don't change this definition
@@ -80,80 +101,138 @@ public class ConnectedHandler extends Handler
     @Override
     public void handle(Message message)
     {
-        // to be completed
-        Pattern p = Pattern.compile("([^;]+);([^;]+);([^;]+);([^;]+)");
+        debug("Got msg: " + message.toString());
+        Pattern p = Pattern.compile("(.+?);(.+?);(.+?);(.*)");
         Matcher m = p.matcher(message.payload);
 
         if (m.find())
         {
-            String respondMsg = m.group(4);
-            if (respondMsg.equals(HELLO))
+            String senderID = m.group(1);
+            String destinationID = m.group(2);
+            int PN = Integer.parseInt(m.group(3));
+            String payload = m.group(4);
+
+            debug("SID: " + senderID + " DID: " + destinationID + " PN: " + PN + " PLD: " + payload);
+
+            if (payload.equals(HELLO) && PN == 0)
+            {
+                debug("Processing as HELLO.");
+                // get ID of the other guy
+                this.remote_ID = Integer.parseInt(senderID);
+                this.remote_packet_number = PN;
+                synchronized (this.lock)
+                {
+                    this.lock.notify();
+                }
+                // ack the HELLO
+                send(ACK);
+            } else if (payload.equals(ACK) && check_IDs(destinationID, senderID))
+            {
+                if (PN == this.local_packet_number)
+                {
+                    debug("Processing as ACK OK.");
+                    this.local_packet_number++;
+                    synchronized (this.lock)
+                    {
+                        this.lock.notify();
+                    }
+                } else
+                    drop_msg("Unexpected ACK PN");
+            } else if (check_IDs(destinationID, senderID)) // actual message
             {
 
-            }
-            else if (respondMsg.equals(ACK))
-            {
-
-            }
-        }
-        else
+                if (PN == this.remote_packet_number + 1) // got next message
+                {
+                    debug("Processing as MSG OK.");
+                    pass_msg_to_app(message);
+                    this.remote_packet_number = PN;
+                    send(ACK);
+                } else if (PN == this.remote_packet_number) // got old message -> reACK
+                {
+                    debug("Processing as MSG OLD.");
+                    send(ACK);
+                } else
+                    drop_msg("Unexpected MSG PN");
+            } else
+                drop_msg("ID mismatch");
+        } else
         {
-            debug("Message is valid");
+            drop_msg("Invalid format");
         }
+    }
+
+    private boolean check_IDs(String destinationID, String senderID)
+    {
+        debug(destinationID + "/" + senderID + ": " + (destinationID.equals(this.local_ID + "")) + " " + ((senderID.equals(this.remote_ID + ""))) + " " + (this.remote_ID == -1));
+        return (destinationID.equals(this.local_ID + "") && (senderID.equals(this.remote_ID + "") || (this.remote_ID == -1)));
+    }
+
+    private void drop_msg(String reason)
+    {
+        debug("Message dropped: " + reason);
+    }
+
+    private void pass_msg_to_app(Message msg)
+    {
+        debug("Message sent to APP: " + msg.toString());
+        aboveHandler.receive(msg);
     }
 
     @Override
     public void send(final String payload)
     {
-        // to be completed
-        int PN = this.senderPN;
-        if (payload.equals("ACK"))
-        {
-            String ackPayload = Integer.toString(this.localId)+";"+Integer.toString(this.remoteId)+";"
-                    +Integer.toString(this.receiverPN)+";"+payload;
-            debug(ackPayload);
-            this.under.send(ackPayload, destination);
-        }
+        int PN;
+        if (payload.equals(ACK))
+            PN = this.remote_packet_number;
         else
+            PN = this.local_packet_number;
+
+        // me; you; number; payload
+        String send_payload = this.local_ID + ";" + this.remote_ID + ";" + PN + ";" + payload;
+        debug("Sent msg: " + send_payload);
+        this.underHandler.send(send_payload, destination);
+
+        // if we send ACK, we do not wait
+        if (payload.equals(ACK))
+            return;
+
+        Handler t_under = this.underHandler;
+
+        // create a new task
+        TimerTask task = new TimerTask()
         {
-            String send_payload = Integer.toString(this.localId) + ";" + Integer.toString(this.remoteId) + ";"
-                    + Integer.toString(this.senderPN) + ";" + payload;
-            System.out.println(send_payload);
-            this.under.send(send_payload, destination);
-            Handler t_under = this.under;
+            int cnt = 0;
 
-            // create a new task
-            TimerTask task = new TimerTask()
+            @Override
+            public void run()
             {
-                int cnt = 0;
-                @Override
-                public void run()
+                cnt += 1;
+                t_under.send(send_payload, destination);
+                debug("Resent: " + send_payload);
+                if (cnt > MAX_REPEAT)
                 {
-                    cnt += 1;
-                    t_under.send(send_payload, destination);
-                    if (cnt > MAX_REPEAT)
-                    {
-                        Thread.currentThread().interrupt();
-                    }
+                    Thread.currentThread().interrupt();
                 }
-            };
+            }
+        };
 
-            // assign tasks
-            TIMER.schedule(task, DELAY);
-            while(this.senderPN == PN)
+        // assign tasks
+        TIMER.schedule(task, DELAY, DELAY);
+        while(this.local_packet_number == PN)
+        {
+            synchronized (this.lock)
             {
-                synchronized (this)
+                try
                 {
-                    try
-                    {
-                        wait();
-                    } catch (InterruptedException e) {
-                        error("Interrupted!", e);
-                    }
+                    this.lock.wait();
+                } catch (InterruptedException e)
+                {
+                    error("Interrupted!", e);
                 }
-                task.cancel();
             }
         }
+        task.cancel();
+
         TIMER.purge();
     }
 
@@ -164,9 +243,9 @@ public class ConnectedHandler extends Handler
     }
 
     @Override
-    public void close() {
-        // to be completed
-        TIMER.cancel();
+    public void close()
+    {
+//        TIMER.cancel();
         super.close();
     }
 
@@ -176,7 +255,8 @@ public class ConnectedHandler extends Handler
 
     static void debug(String msg)
     {
-        System.out.println(msg);
+        if (DEBUG)
+            System.out.println(msg);
     }
 
     // print to sys.err and terminate with err_code 1
