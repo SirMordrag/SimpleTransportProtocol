@@ -1,3 +1,5 @@
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.regex.Matcher;
@@ -30,15 +32,16 @@ public class ConnectedHandler extends Handler
     private static final String HELLO = "--HELLO--";
     private static final String ACK = "--ACK--";
 
+    // 0 for all, 5 for nothing; levels: 0 normal, 1 green, 2 yellow, 3 purple, 4 cyan
+    static int DEBUG = 5;
+
     /**
      * the two following parameters are suitable for manual experimentation and
      * automatic validation
-     */
-    static boolean DEBUG = true;
-    /**
+     *
      * delay before retransmitting a non acked message
      */
-    private static final int DELAY = 300;
+    private static final int DELAY = 1000;
 
     /**
      * number of times a non acked message is sent before timeout
@@ -78,14 +81,9 @@ public class ConnectedHandler extends Handler
         this.remote_packet_number = 0;
         this.underHandler = _under;
         this.lock = new Object();
-        debug("LOCAL ID: " + this.local_ID);
+        debug("LOCAL ID: " + this.local_ID, 4);
         send(HELLO);
-
-        while (this.remote_ID == -1)
-        {
-            // wait
-        }
-        debug("REMOTE ID: " + this.remote_ID);
+        debug("Terminating constructor.", 2);
     }
 
     // don't change this definition
@@ -101,7 +99,7 @@ public class ConnectedHandler extends Handler
     @Override
     public void handle(Message message)
     {
-        debug("Got msg: " + message.toString());
+        debug("Got msg: " + message.toString(), 1);
         Pattern p = Pattern.compile("(.+?);(.+?);(.+?);(.*)");
         Matcher m = p.matcher(message.payload);
 
@@ -118,11 +116,10 @@ public class ConnectedHandler extends Handler
             {
                 debug("Processing as HELLO.");
                 // get ID of the other guy
-                this.remote_ID = Integer.parseInt(senderID);
-                this.remote_packet_number = PN;
                 synchronized (this.lock)
                 {
-                    this.lock.notify();
+                    this.remote_ID = Integer.parseInt(senderID);
+                    this.remote_packet_number = PN;
                 }
                 // ack the HELLO
                 send(ACK);
@@ -131,9 +128,9 @@ public class ConnectedHandler extends Handler
                 if (PN == this.local_packet_number)
                 {
                     debug("Processing as ACK OK.");
-                    this.local_packet_number++;
                     synchronized (this.lock)
                     {
+                        this.local_packet_number++;
                         this.lock.notify();
                     }
                 } else
@@ -145,9 +142,13 @@ public class ConnectedHandler extends Handler
                 {
                     debug("Processing as MSG OK.");
                     pass_msg_to_app(message);
-                    this.remote_packet_number = PN;
+                    synchronized (this.lock)
+                    {
+                        this.remote_packet_number = PN;
+                    }
                     send(ACK);
-                } else if (PN == this.remote_packet_number) // got old message -> reACK
+                }
+                else if (PN == this.remote_packet_number) // got old message -> reACK
                 {
                     debug("Processing as MSG OLD.");
                     send(ACK);
@@ -169,18 +170,21 @@ public class ConnectedHandler extends Handler
 
     private void drop_msg(String reason)
     {
-        debug("Message dropped: " + reason);
+        debug("Message dropped: " + reason, 4);
     }
 
     private void pass_msg_to_app(Message msg)
     {
-        debug("Message sent to APP: " + msg.toString());
+        debug("Message sent to APP: " + msg.toString(), 4);
         aboveHandler.receive(msg);
     }
 
     @Override
     public void send(final String payload)
     {
+        debug("send() ThreadID: " + Thread.currentThread().getId());
+        debug("Sending " + payload);
+
         int PN;
         if (payload.equals(ACK))
             PN = this.remote_packet_number;
@@ -189,14 +193,6 @@ public class ConnectedHandler extends Handler
 
         // me; you; number; payload
         String send_payload = this.local_ID + ";" + this.remote_ID + ";" + PN + ";" + payload;
-        debug("Sent msg: " + send_payload);
-        this.underHandler.send(send_payload, destination);
-
-        // if we send ACK, we do not wait
-        if (payload.equals(ACK))
-            return;
-
-        Handler t_under = this.underHandler;
 
         // create a new task
         TimerTask task = new TimerTask()
@@ -206,25 +202,41 @@ public class ConnectedHandler extends Handler
             @Override
             public void run()
             {
-                cnt += 1;
-                t_under.send(send_payload, destination);
-                debug("Resent: " + send_payload);
-                if (cnt > MAX_REPEAT)
+                cnt++;
+                debug("TimerTask ThreadID: " + Thread.currentThread().getId());
+                underHandler.send(send_payload, destination);
+                debug("Sent msg: " + send_payload, 1);
+                if (cnt > MAX_REPEAT && false)
                 {
-                    Thread.currentThread().interrupt();
+                    debug("Maxed out, cancelling sending of " + send_payload, 4);
+                    synchronized (lock)
+                    {
+                        local_packet_number++;
+                        lock.notify();
+                    }
+                    this.cancel();
                 }
             }
         };
 
         // assign tasks
-        TIMER.schedule(task, DELAY, DELAY);
+
+        if(payload.equals(ACK))
+        {
+            TIMER.schedule(task, 0);
+            return;
+        }
+
+        TIMER.schedule(task, 0, DELAY);
         while(this.local_packet_number == PN)
         {
+            debug("Waiting");
             synchronized (this.lock)
             {
                 try
                 {
                     this.lock.wait();
+                    debug("Notified");
                 } catch (InterruptedException e)
                 {
                     error("Interrupted!", e);
@@ -232,8 +244,6 @@ public class ConnectedHandler extends Handler
             }
         }
         task.cancel();
-
-        TIMER.purge();
     }
 
     @Override
@@ -245,7 +255,6 @@ public class ConnectedHandler extends Handler
     @Override
     public void close()
     {
-//        TIMER.cancel();
         super.close();
     }
 
@@ -255,8 +264,25 @@ public class ConnectedHandler extends Handler
 
     static void debug(String msg)
     {
-        if (DEBUG)
-            System.out.println(msg);
+        debug(msg, 0);
+    }
+
+    static void debug(String msg, int level)
+    {
+        String colour = "";
+        switch (level)
+        {
+            case (1): colour = "\u001B[32m"; break; // green
+            case (2): colour = "\u001B[33m"; break; // yellow
+            case (3): colour = "\u001B[35m"; break; // purple
+            case (4): colour = "\u001B[36m"; break; // cyan
+        }
+
+        if (level >= DEBUG)
+        {
+            String time = "[" + new SimpleDateFormat("HH:mm:ss.SSS").format(new Date()) + "][con] ";
+            System.out.println(colour + time + msg + "\u001B[0m");
+        }
     }
 
     // print to sys.err and terminate with err_code 1
