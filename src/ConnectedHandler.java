@@ -111,21 +111,38 @@ public class ConnectedHandler extends Handler
             String payload = m.group(4);
 
             debug("SID: " + senderID + " DID: " + destinationID + " PN: " + PN + " PLD: " + payload);
-
-            if (payload.equals(HELLO) && PN == 0)
+            if (payload.equals(HELLO))
             {
                 debug("Processing as HELLO.");
-                // get ID of the other guy
-                synchronized (this.lock)
-                {
-                    this.remote_ID = Integer.parseInt(senderID);
-                    this.remote_packet_number = PN;
+                if (destinationID.equals("-1") && PN == 0 && Integer.parseInt(senderID) >= 0) {
+                    if (this.remote_ID == -1) {
+                        synchronized (this.lock)
+                        {
+                            this.remote_ID = Integer.parseInt(senderID);
+                        }
+                        send(ACK);
+                        synchronized (this.lock)
+                        {
+                            this.remote_packet_number = 1;
+                        }
+                    }
+                    else if (this.remote_ID == Integer.parseInt(senderID)) {
+                        synchronized (this.lock)
+                        {
+                            this.remote_packet_number = 0;
+                        }
+                        send(ACK);
+                        synchronized (this.lock)
+                        {
+                            this.remote_packet_number = 1;
+                        }
+                    }
                 }
-                // ack the HELLO
-                send(ACK);
-            } else if (payload.equals(ACK) && check_IDs(destinationID, senderID))
+            }
+            else if (payload.equals(ACK) && check_IDs(destinationID, senderID) && this.remote_ID != -1)
             {
-                if (PN == this.local_packet_number)
+
+                if (PN == this.local_packet_number )
                 {
                     debug("Processing as ACK OK.");
                     synchronized (this.lock)
@@ -134,26 +151,38 @@ public class ConnectedHandler extends Handler
                         this.lock.notify();
                     }
                 } else
+                    debug("local_packet_number: " + this.local_packet_number);
                     drop_msg("Unexpected ACK PN");
-            } else if (check_IDs(destinationID, senderID)) // actual message
+            }
+            else if (check_IDs(destinationID, senderID) && this.remote_ID != -1) // actual message
             {
-
-                if (PN == this.remote_packet_number + 1) // got next message
+                if (aboveHandler == null) return;
+                if (PN == this.remote_packet_number - 1) // got last message
                 {
                     debug("Processing as MSG OK.");
-                    pass_msg_to_app(message);
+                    int temp = this.remote_packet_number;
                     synchronized (this.lock)
                     {
                         this.remote_packet_number = PN;
                     }
                     send(ACK);
+                    synchronized (this.lock)
+                    {
+                        this.remote_packet_number = temp;
+                    }
                 }
-                else if (PN == this.remote_packet_number) // got old message -> reACK
+                else if (PN == this.remote_packet_number) // got new message
                 {
                     debug("Processing as MSG OLD.");
+                    pass_msg_to_app(new Message(payload, Integer.toString(this.local_ID)));
                     send(ACK);
-                } else
+                    synchronized (this.lock)
+                    {
+                        this.remote_packet_number++;
+                    }
+                } else {
                     drop_msg("Unexpected MSG PN");
+                }
             } else
                 drop_msg("ID mismatch");
         } else
@@ -164,8 +193,8 @@ public class ConnectedHandler extends Handler
 
     private boolean check_IDs(String destinationID, String senderID)
     {
-        debug(destinationID + "/" + senderID + ": " + (destinationID.equals(this.local_ID + "")) + " " + ((senderID.equals(this.remote_ID + ""))) + " " + (this.remote_ID == -1));
-        return (destinationID.equals(this.local_ID + "") && (senderID.equals(this.remote_ID + "") || (this.remote_ID == -1)));
+        debug(destinationID + "/" + senderID + ": " + (destinationID.equals(this.local_ID + "")) + " " + ((senderID.equals(this.remote_ID + ""))));
+        return (destinationID.equals(this.local_ID + "") && (senderID.equals(this.remote_ID + "")));
     }
 
     private void drop_msg(String reason)
@@ -206,12 +235,11 @@ public class ConnectedHandler extends Handler
                 debug("TimerTask ThreadID: " + Thread.currentThread().getId());
                 underHandler.send(send_payload, destination);
                 debug("Sent msg: " + send_payload, 1);
-                if (cnt > MAX_REPEAT && false)
+                if (cnt > MAX_REPEAT && false) // max_cnt disabled for now
                 {
                     debug("Maxed out, cancelling sending of " + send_payload, 4);
                     synchronized (lock)
                     {
-                        local_packet_number++;
                         lock.notify();
                     }
                     this.cancel();
@@ -223,7 +251,7 @@ public class ConnectedHandler extends Handler
 
         if(payload.equals(ACK))
         {
-            TIMER.schedule(task, 0);
+            underHandler.send(send_payload, destination);
             return;
         }
 
@@ -242,8 +270,8 @@ public class ConnectedHandler extends Handler
                     error("Interrupted!", e);
                 }
             }
+            task.cancel();
         }
-        task.cancel();
     }
 
     @Override
